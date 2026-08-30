@@ -1856,9 +1856,18 @@ function LogJsonPanel({
   // The system prompt is repeated near-verbatim on almost every request in a session -
   // omit it from the preview pane (it has its own panel above the table) but never from
   // "full" mode, which stays the exact raw wire payload.
-  const previewSafeBody = side === "request" && bodyMode !== "full"
-    ? stripSystemPromptForPreview(effectiveBody)
-    : effectiveBody;
+  // Memoized: stripSystemPromptForPreview always returns a fresh object, and
+  // useLogBodyWorkerView's effect keys on this value's identity (not just bodyKey) to
+  // (re)spawn its formatter worker - an unmemoized new object every render retriggers
+  // that effect every render, which itself is triggered by the worker's own response,
+  // producing an unbounded spawn-worker/postMessage loop that never lets the view
+  // stabilize and can saturate the browser (see NEEDS_ATTENTION.md in ztl-llm-fleet).
+  const previewSafeBody = useMemo(
+    () => side === "request" && bodyMode !== "full"
+      ? stripSystemPromptForPreview(effectiveBody)
+      : effectiveBody,
+    [bodyMode, effectiveBody, side]
+  );
   const bodyKey = logBodyCacheKey(previewSafeBody);
   const bodyView = useLogBodyWorkerView(previewSafeBody, bodyKey, bodyMode, query);
   const chunkViewActive = chunkView?.bodyKey === sourceBodyKey;
