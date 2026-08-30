@@ -1509,7 +1509,7 @@ function OverviewActivityGrid({
                 content={(
                   <>
                     <span className="block font-semibold">{cell.dateLabel}</span>
-                    <span className="mt-0.5 block text-muted-foreground">{formatActivityTokenCount(cell.totalTokens)} {t("tokens")}</span>
+                    <span className="mt-0.5 block text-muted-foreground">{formatCompactNumber(cell.totalTokens)} {t("tokens")}</span>
                   </>
                 )}
                 contentClassName="min-w-[112px] border-border/70 px-2 py-1.5 text-left text-[11px] font-normal"
@@ -1529,6 +1529,8 @@ function OverviewActivityGrid({
   );
 }
 
+// Precise grouped digits for the aria-label only - the visible tooltip content uses
+// formatCompactNumber (e.g. "42K") to match this app's other token/size formatting.
 function formatActivityTokenCount(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(Math.round(Math.max(0, value)));
 }
