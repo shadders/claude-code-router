@@ -258,6 +258,98 @@ function transcriptSegmentForBlock(block: unknown): TranscriptSegment {
   return { kind: "raw", value: block };
 }
 
+// Tier 1 diffing: a session resends its entire prior history on every turn (confirmed against
+// real ccr-data: raw request bodies ~90-101KB while Anthropic's own inputTokens count was 2 on
+// every turn of a real 6-turn session -- see state/NEEDS_ATTENTION.md in the project repo), so two
+// consecutive rows in the transcript view show almost identical text. There's no session/
+// conversation ID in this router's log schema, so "is this a continuation" is determined
+// structurally: does the previous row's message array match a prefix of this row's?
+//
+// Equality is computed on *rendered segments* (transcriptSegmentsForContent), not raw JSON,
+// confirmed necessary against real ccr-data: Anthropic's prompt-cache `cache_control` marker
+// moves between messages as a session grows (present on one turn's last message, gone by the
+// next), and a mid-conversation role:"system" reminder message can flip between plain-string and
+// single-text-block-array representations turn to turn while carrying byte-identical text. Raw
+// JSON equality treats both as different messages and would never collapse anything; segment
+// equality already discards cache_control (transcriptSegmentForBlock never reads it) and treats
+// both content shapes as the same one-text-segment result.
+export type TranscriptRenderPlan =
+  | { kind: "full" }
+  | {
+    boundary?: { message: TranscriptMessage; sharedSegmentCount: number };
+    collapsedMessages: TranscriptMessage[];
+    kind: "diff";
+    newMessages: TranscriptMessage[];
+  };
+
+function transcriptSegmentEqual(a: TranscriptSegment, b: TranscriptSegment): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function transcriptMessageSegmentsEqual(a: TranscriptMessage, b: TranscriptMessage): boolean {
+  if (a.role !== b.role) {
+    return false;
+  }
+  return JSON.stringify(transcriptSegmentsForContent(a.content)) === JSON.stringify(transcriptSegmentsForContent(b.content));
+}
+
+// `previousMessages` is the immediately-preceding row's own request messages (chronologically
+// before this row -- see the caller for how "preceding" is determined from log sort order), or
+// undefined if unknown/unavailable (e.g. it hasn't been loaded, or this is the first row on a
+// page). Only ever called for the request side -- a response row is already a single message
+// with nothing to diff against (see extractTranscriptMessages).
+export function computeTranscriptDiff(
+  previousMessages: TranscriptMessage[] | undefined,
+  currentMessages: TranscriptMessage[]
+): TranscriptRenderPlan {
+  if (!previousMessages || previousMessages.length === 0 || previousMessages.length > currentMessages.length) {
+    return { kind: "full" };
+  }
+
+  const boundaryIndex = previousMessages.length - 1;
+  for (let index = 0; index < boundaryIndex; index++) {
+    if (!transcriptMessageSegmentsEqual(previousMessages[index], currentMessages[index])) {
+      return { kind: "full" };
+    }
+  }
+
+  const previousBoundary = previousMessages[boundaryIndex];
+  const currentBoundary = currentMessages[boundaryIndex];
+  if (previousBoundary.role !== currentBoundary.role) {
+    return { kind: "full" };
+  }
+
+  const previousSegments = transcriptSegmentsForContent(previousBoundary.content);
+  const currentSegments = transcriptSegmentsForContent(currentBoundary.content);
+  let sharedSegmentCount = 0;
+  while (
+    sharedSegmentCount < previousSegments.length &&
+    sharedSegmentCount < currentSegments.length &&
+    transcriptSegmentEqual(previousSegments[sharedSegmentCount], currentSegments[sharedSegmentCount])
+  ) {
+    sharedSegmentCount++;
+  }
+  // The boundary message isn't a clean segment-prefix match -- e.g. a genuinely rewritten history
+  // after Claude Code auto-compaction, or this "previous" row belongs to an unrelated
+  // conversation entirely. Don't force a diff where there isn't one.
+  if (sharedSegmentCount < previousSegments.length) {
+    return { kind: "full" };
+  }
+
+  const newMessages = currentMessages.slice(previousMessages.length);
+  if (sharedSegmentCount === currentSegments.length) {
+    // Boundary message is unchanged entirely (including any trailing content) -- fold it into
+    // the collapsed prefix rather than giving it its own partial-match treatment.
+    return { collapsedMessages: currentMessages.slice(0, previousMessages.length), kind: "diff", newMessages };
+  }
+  return {
+    boundary: { message: currentBoundary, sharedSegmentCount },
+    collapsedMessages: currentMessages.slice(0, boundaryIndex),
+    kind: "diff",
+    newMessages
+  };
+}
+
 export function logBodyKey(body: RequestLogBody | undefined): string {
   if (!body) {
     return "missing";

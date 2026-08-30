@@ -3,7 +3,7 @@ import { Maximize2, Route, X } from "lucide-react";
 import type { RequestRouteTrace, RequestRouteTraceChange, RequestRouteTraceHop } from "@ccr/core/contracts/app";
 import {
   AnimatedIconSwap, Check, ChevronDown, ChevronLeft,
-  ChevronRight, clampNumber, clientInitial, cn, Copy, copyTextToClipboard,
+  ChevronRight, clampNumber, clientInitial, cn, computeTranscriptDiff, Copy, copyTextToClipboard,
   createLogBodyPreviewText, Database, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle,
   extractRequestSystemPromptText, extractTranscriptMessages, formatBytes, formatCompactNumber, formatDuration,
   formatLogDateTime, formatLogTokenSummary, formatNetworkRequestRaw, formatNetworkResponseRaw, formatRouteTracePath, formatUsdCost,
@@ -427,10 +427,21 @@ export function LogsView({
       const next = current === id ? undefined : id;
       if (next !== undefined) {
         loadLogDetail(next);
+        // page.items is sorted created_at DESC (newest first, see getRequestLogPage's ORDER BY),
+        // so the row chronologically *before* this one is the *next* array index, not the
+        // previous one. Fetched purely to diff this row's transcript against it (Tier 1) -- the
+        // previous row itself doesn't need to be expanded for this. Only looks within the
+        // current page; a row at the top of a page has no earlier row loaded to diff against,
+        // which is an accepted scope limit (falls back to a full, undiffed transcript).
+        const index = page.items.findIndex((item) => item.id === next);
+        const precedingItem = index >= 0 ? page.items[index + 1] : undefined;
+        if (precedingItem) {
+          loadLogDetail(precedingItem.id);
+        }
       }
       return next;
     });
-  }, [loadLogDetail]);
+  }, [loadLogDetail, page.items]);
 
   useEffect(() => {
     if (!expandedId || page.items.some((item) => item.id === expandedId)) {
@@ -674,6 +685,7 @@ export function LogsView({
                         item={expandedId === item.id ? detailById[item.id] ?? item : item}
                         key={item.id}
                         onToggle={toggleExpandedLog}
+                        previousRequestBody={expandedId === item.id ? detailById[page.items[index + 1]?.id]?.requestBody : undefined}
                       />
                     ))}
                   </div>
@@ -690,6 +702,7 @@ export function LogsView({
                         logTableGridClass={logTableGridClass}
                         logTableGridStyle={logTableGridStyle}
                         onToggle={toggleExpandedLog}
+                        previousRequestBody={expandedId === item.id ? detailById[page.items[index + 1]?.id]?.requestBody : undefined}
                       />
                     ))}
                   </div>
@@ -820,7 +833,8 @@ function LogMobileCard({
   hasCredentialInfo,
   index,
   item,
-  onToggle
+  onToggle,
+  previousRequestBody
 }: {
   detailError?: string;
   detailLoading?: boolean;
@@ -829,6 +843,7 @@ function LogMobileCard({
   index: number;
   item: RequestLogEntry;
   onToggle: (id: number) => void;
+  previousRequestBody?: RequestLogBody;
 }) {
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
@@ -882,7 +897,14 @@ function LogMobileCard({
           </div>
         </div>
       </button>
-      {expanded ? <LogExpandedDetails detailError={detailError} detailLoading={detailLoading} entry={item} /> : null}
+      {expanded ? (
+        <LogExpandedDetails
+          detailError={detailError}
+          detailLoading={detailLoading}
+          entry={item}
+          previousRequestBody={previousRequestBody}
+        />
+      ) : null}
     </div>
   );
 }
@@ -905,7 +927,8 @@ const LogRow = memo(function LogRow({
   item,
   logTableGridClass,
   logTableGridStyle,
-  onToggle
+  onToggle,
+  previousRequestBody
 }: {
   detailError?: string;
   detailLoading?: boolean;
@@ -916,6 +939,7 @@ const LogRow = memo(function LogRow({
   logTableGridClass: string;
   logTableGridStyle?: LogTableGridStyle;
   onToggle: (id: number) => void;
+  previousRequestBody?: RequestLogBody;
 }) {
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
@@ -958,7 +982,14 @@ const LogRow = memo(function LogRow({
         <div className="network-row-secondary truncate px-2" title={tokenSummary}>{tokenSummary}</div>
         <div className="network-row-secondary truncate px-2">{formatDuration(item.durationMs)}</div>
       </button>
-      {expanded ? <LogExpandedDetails detailError={detailError} detailLoading={detailLoading} entry={item} /> : null}
+      {expanded ? (
+        <LogExpandedDetails
+          detailError={detailError}
+          detailLoading={detailLoading}
+          entry={item}
+          previousRequestBody={previousRequestBody}
+        />
+      ) : null}
     </div>
   );
 });
@@ -997,11 +1028,13 @@ function LogSystemPromptPanel({ text }: { text?: string }) {
 export function LogExpandedDetails({
   detailError,
   detailLoading,
-  entry
+  entry,
+  previousRequestBody
 }: {
   detailError?: string;
   detailLoading?: boolean;
   entry: RequestLogEntry;
+  previousRequestBody?: RequestLogBody;
 }) {
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
@@ -1055,6 +1088,7 @@ export function LogExpandedDetails({
           headerEmptyLabel="No request headers"
           headers={entry.requestHeaders}
           onToggleCollapsed={() => setRequestPaneCollapsed((current) => !current)}
+          previousRequestBody={previousRequestBody}
           requestLogId={entry.id}
           side="request"
           title={t("请求")}
@@ -1823,6 +1857,7 @@ function LogJsonPanel({
   headerEmptyLabel = "No values",
   headers,
   onToggleCollapsed,
+  previousRequestBody,
   requestLogId,
   side,
   subtitle,
@@ -1834,6 +1869,7 @@ function LogJsonPanel({
   headerEmptyLabel?: string;
   headers?: Record<string, string | string[]>;
   onToggleCollapsed?: () => void;
+  previousRequestBody?: RequestLogBody;
   requestLogId: number;
   side: "request" | "response";
   subtitle?: string;
@@ -2100,7 +2136,7 @@ function LogJsonPanel({
       </div>
       <div className="network-pane-body flex min-h-0 flex-1 flex-col overflow-hidden">
         {collapsed ? null : selectedTab === "transcript" ? (
-          <LogTranscriptView body={effectiveBody} side={side} />
+          <LogTranscriptView body={effectiveBody} previousBody={side === "request" ? previousRequestBody : undefined} side={side} />
         ) : selectedTab === "body" ? (
           <>
             <LogJsonBodyToolbar
@@ -2163,9 +2199,27 @@ function LogJsonPanel({
   );
 }
 
-function LogTranscriptView({ body, side }: { body?: RequestLogBody; side: "request" | "response" }) {
+function LogTranscriptView({
+  body,
+  previousBody,
+  side
+}: {
+  body?: RequestLogBody;
+  previousBody?: RequestLogBody;
+  side: "request" | "response";
+}) {
   const t = useAppText();
   const messages = useMemo(() => extractTranscriptMessages(body, side), [body, side]);
+  // Response bodies are already a single assistant message (extractTranscriptMessages) - nothing
+  // to diff there, so previousBody is only ever passed for side === "request".
+  const previousMessages = useMemo(
+    () => side === "request" ? extractTranscriptMessages(previousBody, "request") : undefined,
+    [previousBody, side]
+  );
+  const plan = useMemo(
+    () => messages ? computeTranscriptDiff(previousMessages, messages) : undefined,
+    [messages, previousMessages]
+  );
 
   if (!messages) {
     return (
@@ -2183,9 +2237,31 @@ function LogTranscriptView({ body, side }: { body?: RequestLogBody; side: "reque
     );
   }
 
+  if (!plan || plan.kind === "full") {
+    return (
+      <div className="network-json-scroll min-h-0 flex-1 overflow-auto">
+        {messages.map((message, index) => <TranscriptMessageBlock key={index} message={message} />)}
+      </div>
+    );
+  }
+
   return (
     <div className="network-json-scroll min-h-0 flex-1 overflow-auto">
-      {messages.map((message, index) => <TranscriptMessageBlock key={index} message={message} />)}
+      {plan.collapsedMessages.length > 0 ? (
+        <div className="network-transcript-message border-b px-3 py-2 last:border-b-0">
+          <TranscriptCollapsible
+            label={`${plan.collapsedMessages.length} ${t("earlier messages, same as previous turn")}`}
+          >
+            <div className="flex flex-col gap-2">
+              {plan.collapsedMessages.map((message, index) => <TranscriptMessageBlock key={index} message={message} />)}
+            </div>
+          </TranscriptCollapsible>
+        </div>
+      ) : null}
+      {plan.boundary ? (
+        <TranscriptBoundaryMessageBlock message={plan.boundary.message} sharedSegmentCount={plan.boundary.sharedSegmentCount} />
+      ) : null}
+      {plan.newMessages.map((message, index) => <TranscriptMessageBlock key={index} message={message} />)}
     </div>
   );
 }
@@ -2202,6 +2278,46 @@ function TranscriptMessageBlock({ message }: { message: TranscriptMessage }) {
       <div className="network-muted mb-1.5 text-[10px] font-bold uppercase tracking-wide">{message.role}</div>
       <div className="flex flex-col gap-2">
         {segments.map((segment, index) => <TranscriptSegmentView key={index} segment={segment} />)}
+      </div>
+    </div>
+  );
+}
+
+// The last message shared with the previous turn, where only a *prefix* of its content blocks
+// matched (e.g. a tool_result message that gained an extra block, or lost its cache_control
+// marker as the session grew - see computeTranscriptDiff). The message itself still renders (it's
+// this row's own real content, not collapsed away entirely) - only its already-seen leading
+// blocks collapse, exactly as computeTranscriptDiff determined them shared.
+function TranscriptBoundaryMessageBlock({
+  message,
+  sharedSegmentCount
+}: {
+  message: TranscriptMessage;
+  sharedSegmentCount: number;
+}) {
+  const t = useAppText();
+  const segments = useMemo(() => transcriptSegmentsForContent(message.content), [message.content]);
+  const sharedSegments = segments.slice(0, sharedSegmentCount);
+  const newSegments = segments.slice(sharedSegmentCount);
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="network-transcript-message border-b px-3 py-2 last:border-b-0">
+      <div className="network-muted mb-1.5 text-[10px] font-bold uppercase tracking-wide">{message.role}</div>
+      <div className="flex flex-col gap-2">
+        {sharedSegments.length > 0 ? (
+          <TranscriptCollapsible
+            label={`${sharedSegments.length} ${t("earlier content blocks, same as previous turn")}`}
+          >
+            <div className="flex flex-col gap-2">
+              {sharedSegments.map((segment, index) => <TranscriptSegmentView key={index} segment={segment} />)}
+            </div>
+          </TranscriptCollapsible>
+        ) : null}
+        {newSegments.map((segment, index) => <TranscriptSegmentView key={index} segment={segment} />)}
       </div>
     </div>
   );

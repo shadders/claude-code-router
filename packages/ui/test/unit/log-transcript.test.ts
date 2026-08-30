@@ -2,12 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { RequestLogBody } from "@ccr/core/contracts/app";
 import {
+  computeTranscriptDiff,
   extractTranscriptMessages,
+  TranscriptMessage,
   transcriptSegmentsForContent
 } from "@ccr/ui/pages/home/shared/logs.ts";
 
 function bodyOf(text: string): RequestLogBody {
   return { encoding: "utf8", sizeBytes: Buffer.byteLength(text), text, truncated: false };
+}
+
+function messagesOf(body: RequestLogBody): TranscriptMessage[] {
+  const messages = extractTranscriptMessages(body, "request");
+  assert.ok(messages);
+  return messages;
 }
 
 test("extractTranscriptMessages reads the request messages array", () => {
@@ -161,4 +169,175 @@ test("transcriptSegmentsForContent falls back to raw for an unrecognized block s
   assert.deepEqual(segments[0], { kind: "text", text: "before" });
   assert.deepEqual(segments[1], { kind: "raw", value: { type: "some_future_block_type", weird: true } });
   assert.deepEqual(segments[2], { kind: "text", text: "after" });
+});
+
+// computeTranscriptDiff -- shapes below are grounded in a real 4-turn growing session pulled from
+// a live ccr-data volume (2026-08-30), not guessed. Two real quirks that only showed up in that
+// data, not anticipated up front: (1) Anthropic's prompt-cache `cache_control` marker moves off
+// the last message of a turn once the conversation grows past it, so the boundary message's raw
+// JSON differs turn to turn even though its actual content is unchanged; (2) a mid-conversation
+// role:"system" reminder message can flip between a plain string and a single-text-block array
+// turn to turn while carrying byte-identical text. Both are why equality here is computed on
+// rendered segments, not raw content.
+
+test("computeTranscriptDiff collapses a session's shared prefix and shows only new trailing messages", () => {
+  // Modeled on real ccr-data ids 29 -> 30: msg[0..2] byte-identical, msg[3] (a tool_result) loses
+  // its cache_control marker as the boundary moves, then two brand-new turn messages follow.
+  const previous = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "list the files", role: "user" },
+      { content: "Available agent types...", role: "system" },
+      { content: [{ id: "toolu_1", input: { path: "." }, name: "ls", type: "tool_use" }], role: "assistant" },
+      {
+        content: [{
+          cache_control: { type: "ephemeral" },
+          content: "a.txt\nb.txt",
+          tool_use_id: "toolu_1",
+          type: "tool_result"
+        }],
+        role: "user"
+      }
+    ]
+  })));
+  const current = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "list the files", role: "user" },
+      { content: "Available agent types...", role: "system" },
+      { content: [{ id: "toolu_1", input: { path: "." }, name: "ls", type: "tool_use" }], role: "assistant" },
+      { content: [{ content: "a.txt\nb.txt", tool_use_id: "toolu_1", type: "tool_result" }], role: "user" },
+      { content: [{ id: "toolu_2", input: { path: "a.txt" }, name: "cat", type: "tool_use" }], role: "assistant" },
+      {
+        content: [{
+          cache_control: { type: "ephemeral" },
+          content: "hello",
+          tool_use_id: "toolu_2",
+          type: "tool_result"
+        }],
+        role: "user"
+      }
+    ]
+  })));
+
+  const plan = computeTranscriptDiff(previous, current);
+  assert.equal(plan.kind, "diff");
+  if (plan.kind !== "diff") return;
+  assert.equal(plan.collapsedMessages.length, 4);
+  assert.equal(plan.boundary, undefined);
+  assert.equal(plan.newMessages.length, 2);
+  assert.equal(plan.newMessages[0].role, "assistant");
+  assert.equal(plan.newMessages[1].role, "user");
+});
+
+test("computeTranscriptDiff handles a boundary message that gained a genuinely new trailing block", () => {
+  // A tool_result message that picks up an extra block in the newer row rather than the newer
+  // row simply having additional trailing messages (the edge case called out for this task).
+  const previous = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "hi", role: "user" },
+      { content: [{ content: "part one", type: "text" }], role: "user" }
+    ]
+  })));
+  const current = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "hi", role: "user" },
+      { content: [{ content: "part one", type: "text" }, { content: "part two", type: "text" }], role: "user" }
+    ]
+  })));
+
+  const plan = computeTranscriptDiff(previous, current);
+  assert.equal(plan.kind, "diff");
+  if (plan.kind !== "diff") return;
+  assert.equal(plan.collapsedMessages.length, 1);
+  assert.ok(plan.boundary);
+  assert.equal(plan.boundary?.sharedSegmentCount, 1);
+  assert.equal(plan.newMessages.length, 0);
+});
+
+test("computeTranscriptDiff treats a cache_control-only difference on the boundary message as unchanged", () => {
+  // Modeled on real ccr-data ids 26 -> 27: the boundary message's content is byte-identical text
+  // but flips shape from a single-text-block array (carrying cache_control) to a plain string.
+  const previous = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "hi", role: "user" },
+      { content: [{ cache_control: { type: "ephemeral" }, text: "reminder text", type: "text" }], role: "system" }
+    ]
+  })));
+  const current = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "hi", role: "user" },
+      { content: "reminder text", role: "system" },
+      { content: [{ text: "sure, one sec", type: "text" }], role: "assistant" }
+    ]
+  })));
+
+  const plan = computeTranscriptDiff(previous, current);
+  assert.equal(plan.kind, "diff");
+  if (plan.kind !== "diff") return;
+  // Fully unchanged (including the boundary) folds entirely into collapsedMessages -- no
+  // separate partial-boundary treatment needed when nothing about it is actually new.
+  assert.equal(plan.collapsedMessages.length, 2);
+  assert.equal(plan.boundary, undefined);
+  assert.equal(plan.newMessages.length, 1);
+});
+
+test("computeTranscriptDiff falls back to full rendering when a non-boundary message doesn't match", () => {
+  // Modeled on real ccr-data ids 27 -> 28: a fresh, unrelated conversation happens to be the
+  // immediately-preceding row in the log list. The prefix check itself is the safeguard.
+  const previous = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "first task", role: "user" },
+      { content: "reminder text", role: "system" },
+      { content: [{ text: "ok", type: "text" }], role: "assistant" },
+      { content: [{ content: "done", type: "text" }], role: "user" }
+    ]
+  })));
+  const current = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "an unrelated second task", role: "user" },
+      { content: [{ cache_control: { type: "ephemeral" }, text: "reminder text", type: "text" }], role: "system" }
+    ]
+  })));
+
+  assert.deepEqual(computeTranscriptDiff(previous, current), { kind: "full" });
+});
+
+test("computeTranscriptDiff falls back to full rendering after compaction shortens the history", () => {
+  // Claude Code auto-compaction rewrites history into a genuinely shorter array rather than
+  // appending to it -- must not be mistaken for a normal shrink-and-partial-match.
+  const previous = messagesOf(bodyOf(JSON.stringify({
+    messages: [
+      { content: "a", role: "user" },
+      { content: "b", role: "assistant" },
+      { content: "c", role: "user" },
+      { content: "d", role: "assistant" }
+    ]
+  })));
+  const current = messagesOf(bodyOf(JSON.stringify({
+    messages: [{ content: "compacted summary of the conversation so far", role: "user" }]
+  })));
+
+  assert.deepEqual(computeTranscriptDiff(previous, current), { kind: "full" });
+});
+
+test("computeTranscriptDiff falls back to full rendering with no previous row available", () => {
+  const current = messagesOf(bodyOf(JSON.stringify({ messages: [{ content: "hi", role: "user" }] })));
+  assert.deepEqual(computeTranscriptDiff(undefined, current), { kind: "full" });
+  assert.deepEqual(computeTranscriptDiff([], current), { kind: "full" });
+});
+
+test("computeTranscriptDiff collapses an exact repeat with nothing new to show", () => {
+  const body = bodyOf(JSON.stringify({
+    messages: [
+      { content: "hi", role: "user" },
+      { content: [{ cache_control: { type: "ephemeral" }, text: "reminder text", type: "text" }], role: "system" }
+    ]
+  }));
+  const messages = messagesOf(body);
+
+  const plan = computeTranscriptDiff(messages, messages);
+  assert.equal(plan.kind, "diff");
+  if (plan.kind !== "diff") return;
+  assert.equal(plan.collapsedMessages.length, 2);
+  assert.equal(plan.boundary, undefined);
+  assert.equal(plan.newMessages.length, 0);
 });
