@@ -18,7 +18,7 @@ import {
 } from "@ccr/core/observability/request-log-runtime";
 import { maxRequestLogBodyBytes, rawTraceHardMaxBodyBytes } from "@ccr/core/observability/request-log-limits";
 import { compactBase64ImagePayloads } from "@ccr/core/observability/request-log-body";
-import { requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model";
+import { requestLogCallType, requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model";
 import { isSensitiveRequestLogHeaderName } from "@ccr/core/observability/sensitive-headers";
 import type {
   AgentAnalysisAgentRow,
@@ -211,6 +211,7 @@ export type RequestLogStoreWriteResult = {
 type StoredRequestLogEntry = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  callType: string;
   client: string;
   completedAt: string;
   costUsd: number | undefined;
@@ -585,6 +586,7 @@ export class RequestLogStore {
     const responseModel = normalizeFilterValue(input.responseModel) ??
       requestLogResponseModel(responseBodyText) ??
       "";
+    const callType = requestLogCallType(input.requestBody) ?? "";
     const provider =
       normalizeFilterValue(input.providerName) ??
       readResponseHeader(input.responseHeaders, "x-gateway-target-provider-name") ??
@@ -663,6 +665,7 @@ export class RequestLogStore {
         credential_chain,
         credential_saturated,
         model,
+        call_type,
         requested_model,
         resolved_model,
         response_model,
@@ -697,7 +700,7 @@ export class RequestLogStore {
         response_body_truncated,
         response_body_ref,
         error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let inserted = false;
@@ -716,6 +719,7 @@ export class RequestLogStore {
         credentialInfo.chain.join(","),
         credentialInfo.saturated ? 1 : 0,
         model,
+        callType,
         requestedModel,
         resolvedModel,
         responseModel,
@@ -1049,6 +1053,7 @@ export class RequestLogStore {
             credential_chain,
             credential_saturated,
             model,
+            call_type,
             requested_model,
             resolved_model,
             response_model,
@@ -1215,6 +1220,7 @@ export class RequestLogStore {
             credential_chain,
             credential_saturated,
             model,
+            call_type,
             requested_model,
             resolved_model,
             response_model,
@@ -1369,6 +1375,7 @@ export class RequestLogStore {
         credential_chain TEXT NOT NULL DEFAULT '',
         credential_saturated INTEGER NOT NULL DEFAULT 0,
         model TEXT NOT NULL DEFAULT 'unknown',
+        call_type TEXT NOT NULL DEFAULT '',
         requested_model TEXT NOT NULL DEFAULT '',
         resolved_model TEXT NOT NULL DEFAULT '',
         response_model TEXT NOT NULL DEFAULT '',
@@ -4217,6 +4224,30 @@ function migrateRequestLogModelSummaries(database: SqlDatabase): void {
   })();
 }
 
+function migrateRequestLogCallTypes(database: SqlDatabase): void {
+  const rows = queryRows(database, `
+    SELECT
+      rowid AS id,
+      request_body_text
+    FROM request_logs
+  `);
+  if (rows.length === 0) {
+    return;
+  }
+
+  const update = database.prepare(`
+    UPDATE request_logs
+    SET call_type = ?
+    WHERE rowid = ?
+  `);
+  database.transaction(() => {
+    for (const row of rows) {
+      const callType = requestLogCallType(String(row.request_body_text ?? "")) ?? "";
+      update.run(callType, normalizeCount(row.id));
+    }
+  })();
+}
+
 function ensureRequestLogSchema(database: SqlDatabase): void {
   const columns = new Set(
     queryRows(database, "PRAGMA table_info(request_logs)")
@@ -4226,6 +4257,7 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
   const needsModelSummaryMigration = !columns.has("requested_model") ||
     !columns.has("resolved_model") ||
     !columns.has("response_model");
+  const needsCallTypeMigration = !columns.has("call_type");
   const addColumn = (name: string, definition: string) => {
     if (!columns.has(name)) {
       database.exec(`ALTER TABLE request_logs ADD COLUMN ${name} ${definition}`);
@@ -4247,6 +4279,7 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
   addColumn("credential_chain", "TEXT NOT NULL DEFAULT ''");
   addColumn("credential_saturated", "INTEGER NOT NULL DEFAULT 0");
   addColumn("model", "TEXT NOT NULL DEFAULT 'unknown'");
+  addColumn("call_type", "TEXT NOT NULL DEFAULT ''");
   addColumn("requested_model", "TEXT NOT NULL DEFAULT ''");
   addColumn("resolved_model", "TEXT NOT NULL DEFAULT ''");
   addColumn("response_model", "TEXT NOT NULL DEFAULT ''");
@@ -4290,6 +4323,9 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
 
   if (needsModelSummaryMigration) {
     migrateRequestLogModelSummaries(database);
+  }
+  if (needsCallTypeMigration) {
+    migrateRequestLogCallTypes(database);
   }
 
   ensureRequestLogMigrationSchema(database);
@@ -4852,6 +4888,7 @@ function readRequestLogById(database: SqlDatabase, id: number): StoredRequestLog
         credential_chain,
         credential_saturated,
         model,
+        call_type,
         requested_model,
         resolved_model,
         response_model,
@@ -4911,6 +4948,7 @@ function toRequestLogEntry(row: Record<string, SqlValue>): StoredRequestLogEntry
   return {
     cacheReadTokens: normalizeCount(row.cache_read_tokens),
     cacheWriteTokens: normalizeCount(row.cache_write_tokens),
+    callType: normalizeLabel(String(row.call_type ?? ""), ""),
     client: normalizeLabel(String(row.client ?? ""), "unknown"),
     completedAt: String(row.completed_at ?? ""),
     costUsd,

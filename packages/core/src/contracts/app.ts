@@ -2169,6 +2169,7 @@ export type RequestRouteTrace = {
 export type RequestLogEntry = {
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  callType?: string;
   client: string;
   completedAt?: string;
   costUsd?: number;

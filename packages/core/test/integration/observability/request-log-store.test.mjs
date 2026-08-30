@@ -7,7 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { getHeapStatistics } from "node:v8";
 import { createSseErrorDetector, RequestLogStore } from "@ccr/core/observability/request-log-store.ts";
-import { requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model.ts";
+import { requestLogCallType, requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model.ts";
 import { resolveStreamRequestLogOutcome } from "@ccr/core/gateway/internal/shared.ts";
 import { RequestRouteTraceRecorder } from "@ccr/core/observability/route-trace.ts";
 import { createBetterSqliteDatabase } from "@ccr/core/storage/sqlite-native.ts";
@@ -34,6 +34,30 @@ test("request log model summaries support routed paths and streamed responses", 
     requestLogResponseModel("data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-response\"}}\n\n"),
     "gpt-response"
   );
+});
+
+test("requestLogCallType detects Claude Code's native auto-compact prompt, string or block content", () => {
+  const compactText = [
+    "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+    "Your task is to create a detailed summary of the conversation so far",
+    "Your entire response must be plain text: an <analysis> block followed by a <summary> block."
+  ].join(" ");
+
+  assert.equal(
+    requestLogCallType(JSON.stringify({ messages: [{ content: compactText, role: "user" }] })),
+    "compaction"
+  );
+  assert.equal(
+    requestLogCallType(JSON.stringify({
+      messages: [{ content: [{ text: compactText, type: "text" }], role: "user" }]
+    })),
+    "compaction"
+  );
+  assert.equal(
+    requestLogCallType(JSON.stringify({ messages: [{ content: "hello", role: "user" }] })),
+    undefined
+  );
+  assert.equal(requestLogCallType("not json"), undefined);
 });
 
 test("RequestLogStore backfills model summaries when upgrading an existing database", async () => {
@@ -312,6 +336,121 @@ test("RequestLogStore keeps list rows lightweight and detail rows complete", asy
     assert.equal(detail.responseModel, "response-model");
     assert.match(detail.requestBody.text, /request-model/);
     assert.match(detail.responseBody?.text ?? "", /response-model/);
+  } finally {
+    await store?.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("RequestLogStore tags Claude Code's native auto-compact request with call_type", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-call-type-test-"));
+  let store;
+  try {
+    store = new RequestLogStore(path.join(dir, "request-logs.sqlite"));
+    const compactBody = JSON.stringify({
+      messages: [{
+        content: [{
+          text: [
+            "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+            "Your task is to create a detailed summary of the conversation so far",
+            "Your entire response must be plain text: an <analysis> block followed by a <summary> block."
+          ].join(" "),
+          type: "text"
+        }],
+        role: "user"
+      }],
+      model: "request-model"
+    });
+    const chatBody = JSON.stringify({ messages: [{ content: "hello", role: "user" }], model: "request-model" });
+
+    await store.record({
+      completedAt: new Date().toISOString(),
+      durationMs: 10,
+      method: "POST",
+      path: "/v1/messages",
+      requestBody: Buffer.from(compactBody, "utf8"),
+      requestHeaders: { "content-type": "application/json" },
+      requestId: "request-log-compact-test",
+      responseBodyText: "{}",
+      responseHeaders: { "content-type": "application/json" },
+      startedAt: new Date().toISOString(),
+      statusCode: 200,
+      url: "http://127.0.0.1:3456/v1/messages"
+    });
+    await store.record({
+      completedAt: new Date().toISOString(),
+      durationMs: 10,
+      method: "POST",
+      path: "/v1/messages",
+      requestBody: Buffer.from(chatBody, "utf8"),
+      requestHeaders: { "content-type": "application/json" },
+      requestId: "request-log-chat-test",
+      responseBodyText: "{}",
+      responseHeaders: { "content-type": "application/json" },
+      startedAt: new Date().toISOString(),
+      statusCode: 200,
+      url: "http://127.0.0.1:3456/v1/messages"
+    });
+
+    const page = await store.list({ pageSize: 25 });
+    const compactItem = page.items.find((item) => item.requestId === "request-log-compact-test");
+    const chatItem = page.items.find((item) => item.requestId === "request-log-chat-test");
+    assert.equal(compactItem?.callType, "compaction");
+    assert.equal(chatItem?.callType, "");
+
+    const detail = await store.getDetail({ id: compactItem.id });
+    assert.equal(detail?.callType, "compaction");
+  } finally {
+    await store?.close();
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("RequestLogStore backfills call_type when upgrading an existing database", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ccr-request-log-call-type-migration-test-"));
+  const dbFile = path.join(dir, "request-logs.sqlite");
+  let store;
+  try {
+    const legacy = createBetterSqliteDatabase(dbFile);
+    try {
+      legacy.exec(`
+        CREATE TABLE request_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at TEXT NOT NULL,
+          method TEXT NOT NULL,
+          path TEXT NOT NULL,
+          model TEXT NOT NULL,
+          request_body_text TEXT NOT NULL,
+          response_body_text TEXT NOT NULL
+        );
+      `);
+      legacy.prepare(`
+        INSERT INTO request_logs (
+          created_at, method, path, model, request_body_text, response_body_text
+        ) VALUES (?, 'POST', '/v1/messages', 'resolved-model', ?, '{}')
+      `).run(
+        new Date().toISOString(),
+        JSON.stringify({
+          messages: [{
+            content: [{
+              text: [
+                "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.",
+                "Your task is to create a detailed summary of the conversation so far",
+                "Your entire response must be plain text: an <analysis> block followed by a <summary> block."
+              ].join(" "),
+              type: "text"
+            }],
+            role: "user"
+          }]
+        })
+      );
+    } finally {
+      legacy.close();
+    }
+
+    store = new RequestLogStore(dbFile);
+    const page = await store.list({ pageSize: 25 });
+    assert.equal(page.items[0].callType, "compaction");
   } finally {
     await store?.close();
     rmSync(dir, { force: true, recursive: true });

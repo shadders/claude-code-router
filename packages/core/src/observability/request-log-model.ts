@@ -1,6 +1,37 @@
+import { isClaudeCodeAutoCompactPromptText } from "@ccr/core/gateway/context-archive/protocol";
 import { routeModelFromPath } from "@ccr/core/routing/protocol-adapter";
 
 type JsonRecord = Record<string, unknown>;
+
+export function requestLogCallType(body: Buffer | string): string | undefined {
+  const payload = parseJsonBody(typeof body === "string" ? body : body.toString("utf8"));
+  return isCompactionRequestPayload(payload) ? "compaction" : undefined;
+}
+
+function isCompactionRequestPayload(payload: unknown): boolean {
+  if (!isRecord(payload)) {
+    return false;
+  }
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  return messages.some((message) =>
+    isRecord(message) &&
+    String(message.role ?? "") === "user" &&
+    collectMessageText(message.content).some(isClaudeCodeAutoCompactPromptText)
+  );
+}
+
+function collectMessageText(content: unknown): string[] {
+  if (typeof content === "string") {
+    return [content];
+  }
+  if (Array.isArray(content)) {
+    return content.flatMap(collectMessageText);
+  }
+  if (isRecord(content) && typeof content.text === "string") {
+    return [content.text];
+  }
+  return [];
+}
 
 export function requestLogRequestedModel(body: Buffer | string, path = ""): string | undefined {
   const pathModel = normalizeModel(routeModelFromPath(path));

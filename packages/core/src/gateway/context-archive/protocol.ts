@@ -257,7 +257,7 @@ function claudeCodeCompactHandoffTask(task: string): string {
   ].join("\n");
 }
 
-function isClaudeCodeAutoCompactPromptText(text: string): boolean {
+export function isClaudeCodeAutoCompactPromptText(text: string): boolean {
   const normalized = normalizeWhitespace(text);
   return normalized.includes("CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.") &&
     normalized.includes("Your task is to create a detailed summary of the conversation so far") &&
