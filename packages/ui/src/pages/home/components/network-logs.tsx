@@ -5,10 +5,10 @@ import {
   AnimatedIconSwap, Check, ChevronDown, ChevronLeft,
   ChevronRight, clampNumber, clientInitial, cn, Copy, copyTextToClipboard,
   createLogBodyPreviewText, Database, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle,
-  extractRequestSystemPromptText, formatBytes, formatCompactNumber, formatDuration,
+  extractRequestSystemPromptText, extractTranscriptMessages, formatBytes, formatCompactNumber, formatDuration,
   formatLogDateTime, formatLogTokenSummary, formatNetworkRequestRaw, formatNetworkResponseRaw, formatRouteTracePath, formatUsdCost,
   FormattedLogBody,
-  isJsonContainer, isLargeLogBody, jsonChildPath, logRequestModel,
+  isJsonContainer, isLargeLogBody, isPlainRecord, jsonChildPath, logRequestModel,
   LogBodyFormatMode, logBodyLargeTextThreshold, logBodyPreviewTextLimit, LogBodyWorkerResponse,
   logResolvedRouteModel, logSelectOptions, motion, MoveRight, Network, networkCodeLabel,
   networkExchangeMatchesQuery, networkHeaderRows, networkLifecycleLabel, networkQueryRows, networkRowId, networkSummaryRows,
@@ -16,6 +16,7 @@ import {
   ReactNode, ReactPointerEvent, RefreshCw, RequestLogBody, RequestLogBodyChunk, RequestLogEntry, RequestLogListFilter,
   RequestLogPage, requestLogPageSizeOptions, RequestLogStatusFilter, requestLogStatusOptions, Search, Select,
   stripSystemPromptForPreview,
+  transcriptSegmentsForContent, TranscriptMessage, TranscriptSegment,
   translateOptions, Trash2, useAppNumberLocale, useAppText, useCallback, useEffect, useMemo, useRef,
   useState
 } from "../shared/index";
@@ -1564,7 +1565,7 @@ function LogStreamCell({ entry }: { entry: RequestLogEntry }) {
   );
 }
 
-type LogPayloadTab = "body" | "header";
+type LogPayloadTab = "transcript" | "body" | "header";
 
 type LogBodyPanelView = FormattedLogBody & {
   bodyKey: string;
@@ -1839,7 +1840,7 @@ function LogJsonPanel({
   title: string;
 }) {
   const t = useAppText();
-  const [selectedTab, setSelectedTab] = useState<LogPayloadTab>("body");
+  const [selectedTab, setSelectedTab] = useState<LogPayloadTab>("transcript");
   const [preferTextBody, setPreferTextBody] = useState(false);
   const [bodyMode, setBodyMode] = useState<LogBodyFormatMode>("preview");
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
@@ -1902,6 +1903,7 @@ function LogJsonPanel({
     setFullBodyError("");
     setPreferTextBody(false);
     setBodyMode("preview");
+    setSelectedTab("transcript");
   }, [sourceBodyKey]);
 
   useEffect(() => {
@@ -2079,7 +2081,7 @@ function LogJsonPanel({
         {subtitle ? <span className="network-muted shrink-0 text-[12px] font-semibold">{subtitle}</span> : null}
         {!collapsed ? (
           <div className="network-payload-tabs flex min-w-0 items-center rounded-md border p-0.5">
-            {(["body", "header"] as const).map((tab) => (
+            {(["transcript", "body", "header"] as const).map((tab) => (
               <button
                 aria-pressed={selectedTab === tab}
                 className={cn(
@@ -2097,7 +2099,9 @@ function LogJsonPanel({
         ) : null}
       </div>
       <div className="network-pane-body flex min-h-0 flex-1 flex-col overflow-hidden">
-        {collapsed ? null : selectedTab === "body" ? (
+        {collapsed ? null : selectedTab === "transcript" ? (
+          <LogTranscriptView body={effectiveBody} side={side} />
+        ) : selectedTab === "body" ? (
           <>
             <LogJsonBodyToolbar
               body={effectiveBody}
@@ -2155,6 +2159,146 @@ function LogJsonPanel({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function LogTranscriptView({ body, side }: { body?: RequestLogBody; side: "request" | "response" }) {
+  const t = useAppText();
+  const messages = useMemo(() => extractTranscriptMessages(body, side), [body, side]);
+
+  if (!messages) {
+    return (
+      <div className="network-muted flex min-h-0 flex-1 items-center justify-center p-4 text-center text-[12px]">
+        {t("No message transcript available for this body -- see the Body (raw JSON) tab.")}
+      </div>
+    );
+  }
+
+  if (messages.length === 0) {
+    return (
+      <div className="network-muted flex min-h-0 flex-1 items-center justify-center p-4 text-[12px]">
+        {t("Empty transcript.")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="network-json-scroll min-h-0 flex-1 overflow-auto">
+      {messages.map((message, index) => <TranscriptMessageBlock key={index} message={message} />)}
+    </div>
+  );
+}
+
+function TranscriptMessageBlock({ message }: { message: TranscriptMessage }) {
+  const segments = useMemo(() => transcriptSegmentsForContent(message.content), [message.content]);
+
+  if (segments.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="network-transcript-message border-b px-3 py-2 last:border-b-0">
+      <div className="network-muted mb-1.5 text-[10px] font-bold uppercase tracking-wide">{message.role}</div>
+      <div className="flex flex-col gap-2">
+        {segments.map((segment, index) => <TranscriptSegmentView key={index} segment={segment} />)}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptSegmentView({ segment }: { segment: TranscriptSegment }) {
+  const t = useAppText();
+
+  switch (segment.kind) {
+    case "text":
+      return <p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed">{segment.text}</p>;
+    case "thinking":
+      return (
+        <TranscriptCollapsible label={t("Thinking")}>
+          <p className="whitespace-pre-wrap break-words text-[12px] italic leading-relaxed">{segment.text}</p>
+        </TranscriptCollapsible>
+      );
+    case "tool_call":
+      return <ToolCallView input={segment.input} name={segment.name} />;
+    case "tool_result":
+      return (
+        <div className="network-transcript-tool-result border-l-2 pl-2">
+          <div className="network-muted mb-1 text-[10px] font-bold uppercase tracking-wide">
+            {segment.isError ? t("Result (error)") : t("Result")}
+          </div>
+          {segment.segments.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              {segment.segments.map((inner, index) => <TranscriptSegmentView key={index} segment={inner} />)}
+            </div>
+          ) : (
+            <span className="network-muted text-[12px] italic">{t("(empty)")}</span>
+          )}
+        </div>
+      );
+    case "image":
+      return <p className="network-muted text-[12px] italic">[{t("image")}]</p>;
+    case "raw":
+      return (
+        <TranscriptCollapsible label={t("Unrecognized content block")}>
+          <pre className="network-json-scroll whitespace-pre-wrap break-words font-mono text-[11px]">
+            {JSON.stringify(segment.value, null, 2)}
+          </pre>
+        </TranscriptCollapsible>
+      );
+  }
+}
+
+function TranscriptCollapsible({ children, label }: { children: ReactNode; label: string }) {
+  const [collapsed, setCollapsed] = useState(true);
+
+  return (
+    <div className="network-transcript-collapsible rounded-md border">
+      <button
+        aria-expanded={!collapsed}
+        className="flex w-full min-w-0 items-center gap-1.5 px-2 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        onClick={() => setCollapsed((current) => !current)}
+        type="button"
+      >
+        <ChevronDown className={cn("h-3 w-3 shrink-0 transition-transform", !collapsed && "rotate-180")} />
+        <span className="network-muted truncate text-[11px] font-semibold">{label}</span>
+      </button>
+      {!collapsed ? <div className="border-t px-2 py-1.5">{children}</div> : null}
+    </div>
+  );
+}
+
+function formatTranscriptArgValue(value: unknown): { inline: string; long: boolean } {
+  if (typeof value === "string") {
+    return value.length > 100 || value.includes("\n")
+      ? { inline: `<${value.length} chars>`, long: true }
+      : { inline: JSON.stringify(value), long: false };
+  }
+  if (isPlainRecord(value) || Array.isArray(value)) {
+    return { inline: Array.isArray(value) ? `<array, ${value.length} items>` : "<object>", long: true };
+  }
+  return { inline: JSON.stringify(value), long: false };
+}
+
+function ToolCallView({ input, name }: { input: unknown; name: string }) {
+  const t = useAppText();
+  const entries = isPlainRecord(input) ? Object.entries(input) : [];
+  const rendered = entries.map(([key, value]) => ({ key, value, ...formatTranscriptArgValue(value) }));
+  const summary = rendered.map((entry) => `${entry.key}: ${entry.inline}`).join(", ");
+  const longEntries = rendered.filter((entry) => entry.long);
+
+  return (
+    <div className="network-transcript-tool-call rounded-md border p-2">
+      <div className="font-mono text-[12px]">
+        <span className="font-semibold">{t("Tool call:")}</span> {name}({summary})
+      </div>
+      {longEntries.map((entry) => (
+        <TranscriptCollapsible key={entry.key} label={entry.key}>
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11px]">
+            {typeof entry.value === "string" ? entry.value : JSON.stringify(entry.value, null, 2)}
+          </pre>
+        </TranscriptCollapsible>
+      ))}
     </div>
   );
 }

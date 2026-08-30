@@ -166,6 +166,98 @@ export function stripSystemPromptForPreview(body: RequestLogBody | undefined): R
   return { ...body, text: JSON.stringify({ ...payload, system: systemPromptPreviewPlaceholder }) };
 }
 
+// Tier 1: a readable reconstruction of what was actually said in a turn, as opposed to Tier 2
+// (the raw wire JSON, still shown as-is elsewhere). Scoped to the Anthropic Messages shape this
+// router's own traffic actually uses (confirmed against real `ccr-data` rows before writing this,
+// not assumed) -- a shape this parser doesn't recognize falls back to raw JSON for that one block
+// rather than failing the whole transcript.
+export type TranscriptMessage = {
+  content: unknown;
+  role: string;
+};
+
+export type TranscriptSegment =
+  | { kind: "image" }
+  | { kind: "raw"; value: unknown }
+  | { kind: "text"; text: string }
+  | { isError?: boolean; kind: "tool_result"; segments: TranscriptSegment[] }
+  | { input: unknown; kind: "tool_call"; name: string }
+  | { kind: "thinking"; text: string };
+
+// Request bodies carry the full `messages` array directly. Response bodies (streaming or not)
+// are effectively a single assistant turn -- reuse formatLogBodyView's existing parse-or-aggregate
+// logic (same one already used for Tier 2's JSON view) rather than re-deriving SSE aggregation
+// here, so both tiers stay consistent with exactly the same reconstructed content.
+export function extractTranscriptMessages(
+  body: RequestLogBody | undefined,
+  side: "request" | "response"
+): TranscriptMessage[] | undefined {
+  if (!body || body.encoding === "base64" || !body.text.trim()) {
+    return undefined;
+  }
+
+  if (side === "request") {
+    const payload = parseLogJson(body.text);
+    if (!isPlainRecord(payload) || !Array.isArray(payload.messages)) {
+      return undefined;
+    }
+    return payload.messages
+      .filter(isPlainRecord)
+      .map((message) => ({ content: message.content, role: stringValue(message.role) || "unknown" }));
+  }
+
+  const payload = formatLogBodyView(body).json;
+  if (!isPlainRecord(payload) || payload.content === undefined) {
+    return undefined;
+  }
+  return [{ content: payload.content, role: stringValue(payload.role) || "assistant" }];
+}
+
+export function transcriptSegmentsForContent(content: unknown): TranscriptSegment[] {
+  if (content === undefined || content === null) {
+    return [];
+  }
+  if (typeof content === "string") {
+    return content.trim() ? [{ kind: "text", text: content }] : [];
+  }
+  if (!Array.isArray(content)) {
+    return [{ kind: "raw", value: content }];
+  }
+  return content.map(transcriptSegmentForBlock);
+}
+
+function transcriptSegmentForBlock(block: unknown): TranscriptSegment {
+  if (typeof block === "string") {
+    return { kind: "text", text: block };
+  }
+  if (!isPlainRecord(block)) {
+    return { kind: "raw", value: block };
+  }
+
+  const type = stringValue(block.type);
+
+  if (type === "text" && typeof block.text === "string") {
+    return { kind: "text", text: block.text };
+  }
+  if (type === "thinking" && typeof block.thinking === "string") {
+    return { kind: "thinking", text: block.thinking };
+  }
+  if (type === "tool_use") {
+    return { input: block.input, kind: "tool_call", name: stringValue(block.name) || "unknown_tool" };
+  }
+  if (type === "tool_result") {
+    return {
+      isError: block.is_error === true,
+      kind: "tool_result",
+      segments: transcriptSegmentsForContent(block.content)
+    };
+  }
+  if (type === "image") {
+    return { kind: "image" };
+  }
+  return { kind: "raw", value: block };
+}
+
 export function logBodyKey(body: RequestLogBody | undefined): string {
   if (!body) {
     return "missing";
