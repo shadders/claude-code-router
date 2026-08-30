@@ -6,8 +6,12 @@ services:
     image: claude-code-router:local
     ports:
       # Publish only Nginx. Internal web/gateway listeners stay inside the container.
-      # Bound to loopback only per docker/README.md's local-only guidance.
-      - "127.0.0.1:3458:8080"
+      # Bound to all interfaces (LAN-exposed), overriding docker/README.md's
+      # local-only guidance -- deliberate, ongoing choice (not a one-off debug
+      # session): Steve wants to reach this dashboard from another machine on the
+      # LAN (e.g. Windows) and has confirmed he accepts the risk (no TLS/management
+      # token in front of this yet -- see docker/README.md's Security guidance).
+      - "3458:8080"
     volumes:
       - ccr-data:/data
       # Read-only import of this host's Claude Code CLI OAuth login, so the
