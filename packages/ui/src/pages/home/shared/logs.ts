@@ -121,6 +121,51 @@ export type FormattedLogBody = {
   text: string;
 };
 
+// The Anthropic Messages `system` field. Sessions resend it unchanged on almost every
+// turn, so showing it inline per row is mostly noise - callers surface it once (see the
+// system-prompt panel) and use stripSystemPromptForPreview to omit it from the per-row
+// preview text.
+export function extractRequestSystemPromptText(body: RequestLogBody | undefined): string | undefined {
+  if (!body || body.encoding === "base64" || !body.text.trim()) {
+    return undefined;
+  }
+  const payload = parseLogJson(body.text);
+  if (!isPlainRecord(payload)) {
+    return undefined;
+  }
+  return systemFieldText(payload.system);
+}
+
+function systemFieldText(system: unknown): string | undefined {
+  if (typeof system === "string") {
+    return system.trim() || undefined;
+  }
+  if (Array.isArray(system)) {
+    const text = system
+      .map((block) => isPlainRecord(block) && typeof block.text === "string" ? block.text : "")
+      .filter(Boolean)
+      .join("\n\n");
+    return text.trim() || undefined;
+  }
+  return undefined;
+}
+
+export const systemPromptPreviewPlaceholder =
+  "[system prompt omitted from preview - see the System Prompt panel above; still present in the full raw payload]";
+
+// Only for the per-row "preview" pane - never applied to the full/raw body, which stays
+// ground truth (the actual wire payload) per this project's verify_dont_trust discipline.
+export function stripSystemPromptForPreview(body: RequestLogBody | undefined): RequestLogBody | undefined {
+  if (!body || body.encoding === "base64" || !body.text.trim()) {
+    return body;
+  }
+  const payload = parseLogJson(body.text);
+  if (!isPlainRecord(payload) || payload.system === undefined) {
+    return body;
+  }
+  return { ...body, text: JSON.stringify({ ...payload, system: systemPromptPreviewPlaceholder }) };
+}
+
 export function logBodyKey(body: RequestLogBody | undefined): string {
   if (!body) {
     return "missing";

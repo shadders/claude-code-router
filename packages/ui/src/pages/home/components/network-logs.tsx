@@ -4,7 +4,8 @@ import type { RequestRouteTrace, RequestRouteTraceChange, RequestRouteTraceHop }
 import {
   AnimatedIconSwap, Check, ChevronDown, ChevronLeft,
   ChevronRight, clampNumber, clientInitial, cn, Copy, copyTextToClipboard,
-  createLogBodyPreviewText, Database, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle, formatBytes, formatCompactNumber, formatDuration,
+  createLogBodyPreviewText, Database, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle,
+  extractRequestSystemPromptText, formatBytes, formatCompactNumber, formatDuration,
   formatLogDateTime, formatLogTokenSummary, formatNetworkRequestRaw, formatNetworkResponseRaw, formatRouteTracePath, formatUsdCost,
   FormattedLogBody,
   isJsonContainer, isLargeLogBody, jsonChildPath, logRequestModel,
@@ -14,6 +15,7 @@ import {
   Pause, Play, ProxyNetworkBody, ProxyNetworkExchange, ProxyNetworkSnapshot, ProxyStatus,
   ReactNode, ReactPointerEvent, RefreshCw, RequestLogBody, RequestLogBodyChunk, RequestLogEntry, RequestLogListFilter,
   RequestLogPage, requestLogPageSizeOptions, RequestLogStatusFilter, requestLogStatusOptions, Search, Select,
+  stripSystemPromptForPreview,
   translateOptions, Trash2, useAppNumberLocale, useAppText, useCallback, useEffect, useMemo, useRef,
   useState
 } from "../shared/index";
@@ -375,6 +377,11 @@ export function LogsView({
   const t = useAppText();
   const [expandedId, setExpandedId] = useState<number>();
   const [detailById, setDetailById] = useState<Record<number, RequestLogEntry>>({});
+  // Loaded opportunistically from whichever row detail has been fetched so far (list rows
+  // don't carry body text - see requestLogBodyMetadataSelect), rather than issuing a
+  // dedicated fetch just for this panel. Sticks with the first one found for this page's
+  // session, since a session resends its system prompt near-verbatim on every turn.
+  const [sessionSystemPromptText, setSessionSystemPromptText] = useState<string>();
   const [detailErrorById, setDetailErrorById] = useState<Record<number, string>>({});
   const [detailLoadingId, setDetailLoadingId] = useState<number>();
   const [logColumnWidths, setLogColumnWidths] = useState<LogTableColumnWidths>({});
@@ -430,6 +437,19 @@ export function LogsView({
     }
     setExpandedId(undefined);
   }, [expandedId, page.items]);
+
+  useEffect(() => {
+    if (sessionSystemPromptText) {
+      return;
+    }
+    for (const detail of Object.values(detailById)) {
+      const text = extractRequestSystemPromptText(detail.requestBody);
+      if (text) {
+        setSessionSystemPromptText(text);
+        return;
+      }
+    }
+  }, [detailById, sessionSystemPromptText]);
 
   useEffect(() => {
     if (!focusedRequestId || !page.items.some((item) => item.id === focusedRequestId)) {
@@ -596,6 +616,8 @@ export function LogsView({
         {error ? (
           <div className="network-error-box mx-3 mt-3 rounded-md border px-3 py-2 text-[12px]">{error}</div>
         ) : null}
+
+        <LogSystemPromptPanel text={sessionSystemPromptText} />
 
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="network-table-scroll min-h-0 flex-1 overflow-auto">
@@ -939,6 +961,37 @@ const LogRow = memo(function LogRow({
     </div>
   );
 });
+
+function LogSystemPromptPanel({ text }: { text?: string }) {
+  const t = useAppText();
+  const [collapsed, setCollapsed] = useState(true);
+
+  if (!text) {
+    return null;
+  }
+
+  return (
+    <div className="network-body-meta border-b px-3 py-2 text-[12px]">
+      <button
+        aria-expanded={!collapsed}
+        className="flex w-full min-w-0 items-center gap-2 text-left font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        onClick={() => setCollapsed((current) => !current)}
+        type="button"
+      >
+        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", !collapsed && "rotate-180")} />
+        <span>{t("System prompt")}</span>
+        <span className="network-muted ml-auto min-w-0 shrink truncate text-[11px] font-normal">
+          {t("Shown once per page - omitted from individual row previews")}
+        </span>
+      </button>
+      {!collapsed ? (
+        <pre className="network-json-scroll mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-card/40 p-2 font-mono text-[11px]">
+          {text}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
 
 export function LogExpandedDetails({
   detailError,
@@ -1783,8 +1836,14 @@ function LogJsonPanel({
   const effectiveBody = loadedBody && loadedBody.bodyRef && loadedBody.bodyRef === body?.bodyRef
     ? loadedBody
     : body;
-  const bodyKey = logBodyCacheKey(effectiveBody);
-  const bodyView = useLogBodyWorkerView(effectiveBody, bodyKey, bodyMode, query);
+  // The system prompt is repeated near-verbatim on almost every request in a session -
+  // omit it from the preview pane (it has its own panel above the table) but never from
+  // "full" mode, which stays the exact raw wire payload.
+  const previewSafeBody = side === "request" && bodyMode !== "full"
+    ? stripSystemPromptForPreview(effectiveBody)
+    : effectiveBody;
+  const bodyKey = logBodyCacheKey(previewSafeBody);
+  const bodyView = useLogBodyWorkerView(previewSafeBody, bodyKey, bodyMode, query);
   const chunkViewActive = chunkView?.bodyKey === sourceBodyKey;
   const toolbarBodyView = fullBodyLoading || fullBodyError
     ? {
