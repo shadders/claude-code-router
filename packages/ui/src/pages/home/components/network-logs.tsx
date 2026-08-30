@@ -1005,6 +1005,8 @@ export function LogExpandedDetails({
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
   const hasCredentialInfo = logHasCredentialInfo(entry);
+  const [requestPaneCollapsed, setRequestPaneCollapsed] = useState(false);
+  const [responsePaneCollapsed, setResponsePaneCollapsed] = useState(false);
 
   return (
     <div className="network-detail border-b">
@@ -1046,12 +1048,23 @@ export function LogExpandedDetails({
         </div>
       ) : null}
       <div className="network-detail-panes grid h-[440px] min-h-0 grid-cols-1 lg:grid-cols-2">
-        <LogJsonPanel body={entry.requestBody} headerEmptyLabel="No request headers" headers={entry.requestHeaders} requestLogId={entry.id} side="request" title={t("请求")} />
+        <LogJsonPanel
+          body={entry.requestBody}
+          collapsed={requestPaneCollapsed}
+          headerEmptyLabel="No request headers"
+          headers={entry.requestHeaders}
+          onToggleCollapsed={() => setRequestPaneCollapsed((current) => !current)}
+          requestLogId={entry.id}
+          side="request"
+          title={t("请求")}
+        />
         <LogJsonPanel
           body={entry.responseBody}
           className="border-t lg:border-l lg:border-t-0"
+          collapsed={responsePaneCollapsed}
           headerEmptyLabel="No response headers"
           headers={entry.responseHeaders}
+          onToggleCollapsed={() => setResponsePaneCollapsed((current) => !current)}
           requestLogId={entry.id}
           side="response"
           subtitle={`HTTP ${entry.statusCode || "-"}`}
@@ -1805,8 +1818,10 @@ function filterStaticLogBodyText(text: string, query: string): string {
 function LogJsonPanel({
   body,
   className,
+  collapsed = false,
   headerEmptyLabel = "No values",
   headers,
+  onToggleCollapsed,
   requestLogId,
   side,
   subtitle,
@@ -1814,8 +1829,10 @@ function LogJsonPanel({
 }: {
   body?: RequestLogBody;
   className?: string;
+  collapsed?: boolean;
   headerEmptyLabel?: string;
   headers?: Record<string, string | string[]>;
+  onToggleCollapsed?: () => void;
   requestLogId: number;
   side: "request" | "response";
   subtitle?: string;
@@ -2036,29 +2053,42 @@ function LogJsonPanel({
     : visible;
 
   return (
-    <div className={cn("network-pane-split flex min-h-0 min-w-0 flex-col", className)}>
+    <div className={cn("network-pane-split flex min-h-0 min-w-0 flex-col", collapsed && "h-10 shrink-0 overflow-hidden", className)}>
       <div className="network-pane-header flex h-10 min-w-0 shrink-0 items-center gap-3 border-b px-3">
+        {onToggleCollapsed ? (
+          <button
+            aria-expanded={!collapsed}
+            aria-label={`${collapsed ? t("Expand") : t("Collapse")} ${title}`}
+            className="network-control-button flex h-6 w-6 shrink-0 items-center justify-center rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+            onClick={onToggleCollapsed}
+            type="button"
+          >
+            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")} />
+          </button>
+        ) : null}
         <span className="network-pane-title shrink-0 text-[14px] font-bold">{title}</span>
         {subtitle ? <span className="network-muted shrink-0 text-[12px] font-semibold">{subtitle}</span> : null}
-        <div className="network-payload-tabs flex min-w-0 items-center rounded-md border p-0.5">
-          {(["body", "header"] as const).map((tab) => (
-            <button
-              aria-pressed={selectedTab === tab}
-              className={cn(
-                "network-payload-tab h-6 rounded-[5px] border border-transparent px-2.5 text-[12px] font-semibold capitalize outline-none transition-[background-color,border-color,color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring/30",
-                selectedTab === tab && "network-payload-tab-active"
-              )}
-              key={tab}
-              onClick={() => setSelectedTab(tab)}
-              type="button"
-            >
-              {t(tab)}
-            </button>
-          ))}
-        </div>
+        {!collapsed ? (
+          <div className="network-payload-tabs flex min-w-0 items-center rounded-md border p-0.5">
+            {(["body", "header"] as const).map((tab) => (
+              <button
+                aria-pressed={selectedTab === tab}
+                className={cn(
+                  "network-payload-tab h-6 rounded-[5px] border border-transparent px-2.5 text-[12px] font-semibold capitalize outline-none transition-[background-color,border-color,color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring/30",
+                  selectedTab === tab && "network-payload-tab-active"
+                )}
+                key={tab}
+                onClick={() => setSelectedTab(tab)}
+                type="button"
+              >
+                {t(tab)}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
       <div className="network-pane-body flex min-h-0 flex-1 flex-col overflow-hidden">
-        {selectedTab === "body" ? (
+        {collapsed ? null : selectedTab === "body" ? (
           <>
             <LogJsonBodyToolbar
               body={effectiveBody}

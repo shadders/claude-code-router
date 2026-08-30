@@ -4,7 +4,7 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentAnalysisSessionRow, AgentAnalysisTraceRun, RequestLogEntry, RequestLogPage } from "@ccr/core/contracts/app.ts";
 import { AgentAnalysisView } from "@ccr/ui/pages/home/components/dashboard.tsx";
-import { LogsView } from "@ccr/ui/pages/home/components/network-logs.tsx";
+import { LogExpandedDetails, LogsView } from "@ccr/ui/pages/home/components/network-logs.tsx";
 import { AppI18nContext, appCopy } from "@ccr/ui/pages/home/shared/i18n.tsx";
 import { createEmptyAgentAnalysis } from "@ccr/ui/pages/home/shared/usage.ts";
 
@@ -111,6 +111,18 @@ test("LogsView keeps Chinese token column copy as Token", () => {
 
   assert.match(html, /Token/);
   assert.doesNotMatch(html, /令牌/);
+});
+
+test("LogExpandedDetails renders independently collapsible request and response panes, expanded by default", () => {
+  const html = renderToStaticMarkup(
+    <AppI18nContext.Provider value={appCopy.en}>
+      <LogExpandedDetails entry={sampleRequestLogEntry} />
+    </AppI18nContext.Provider>
+  );
+
+  const collapseButtons = html.match(/aria-label="Collapse [^"]+"/g) ?? [];
+  assert.equal(collapseButtons.length, 2);
+  assert.doesNotMatch(html, /aria-label="Expand /);
 });
 
 test("AgentAnalysisView keeps session headings horizontal and shows cache rate and cost", () => {
