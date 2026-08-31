@@ -2193,6 +2193,7 @@ export type RequestLogEntry = {
   requestBody: RequestLogBody;
   requestHeaders: Record<string, string | string[]>;
   requestId: string;
+  requestPreview?: string;
   routeAttemptCount: number;
   routeHopCount: number;
   routeTrace?: RequestRouteTrace;
@@ -2201,6 +2202,7 @@ export type RequestLogEntry = {
   resolvedModel?: string;
   responseBody?: RequestLogBody;
   responseModel?: string;
+  responsePreview?: string;
   responseHeaders: Record<string, string | string[]>;
   statusCode: number;
   totalTokens: number;

@@ -27,6 +27,19 @@ export function formatLogDateTime(value: string): string {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} ${offset}`;
 }
 
+// Collapsed-row-specific: HH:MM:SS only. formatLogDateTime (the full YYYY-MM-DD HH:MM:SS GMT±N
+// form) stays as-is for the row's `title` tooltip and for LogExpandedDetails.
+export function formatLogDateTimeShort(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return "";
+  }
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
 export function formatLogTokenSummary(entry: RequestLogEntry, t: (value: string) => string, locale?: Intl.LocalesArgument): string {
   if (
     entry.totalTokens === 0 &&
@@ -54,6 +67,15 @@ export function formatLogTokenSummary(entry: RequestLogEntry, t: (value: string)
   }
 
   return values.join("  ");
+}
+
+// Collapsed-row-specific: input/output only, none of the cache/reasoning clutter
+// formatLogTokenSummary shows -- that detail stays exactly as-is in LogExpandedDetails.
+export function formatLogTokenSummaryCompact(entry: RequestLogEntry, t: (value: string) => string, locale?: Intl.LocalesArgument): string {
+  if (entry.inputTokens === 0 && entry.outputTokens === 0) {
+    return "-";
+  }
+  return `${formatCompactNumber(entry.inputTokens, locale)} ${t("入")} / ${formatCompactNumber(entry.outputTokens, locale)} ${t("出")}`;
 }
 
 export function logRequestModel(entry: RequestLogEntry): string {
@@ -256,6 +278,20 @@ function transcriptSegmentForBlock(block: unknown): TranscriptSegment {
     return { kind: "image" };
   }
   return { kind: "raw", value: block };
+}
+
+// Collapsed-row request/response previews: entry.requestPreview/responsePreview are computed
+// server-side at write time (request-log-model.ts), since list-page queries never select the full
+// body text (see requestLogBodyMetadataSelect in request-log-store.ts) -- there's nothing to
+// extract client-side for an unexpanded row. This just owns the display-side truncation.
+const logRowPreviewMaxWords = 8;
+
+export function truncateLogRowPreviewText(text: string, maxWords: number = logRowPreviewMaxWords): string {
+  const words = text.trim().split(/\s+/);
+  if (words.length <= maxWords) {
+    return text.trim();
+  }
+  return `${words.slice(0, maxWords).join(" ")}…`;
 }
 
 // Tier 1 diffing: a session resends its entire prior history on every turn (confirmed against

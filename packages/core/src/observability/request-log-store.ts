@@ -18,7 +18,7 @@ import {
 } from "@ccr/core/observability/request-log-runtime";
 import { maxRequestLogBodyBytes, rawTraceHardMaxBodyBytes } from "@ccr/core/observability/request-log-limits";
 import { compactBase64ImagePayloads } from "@ccr/core/observability/request-log-body";
-import { requestLogCallType, requestLogRequestedModel, requestLogResponseModel } from "@ccr/core/observability/request-log-model";
+import { requestLogCallType, requestLogRequestedModel, requestLogRequestPreview, requestLogResponseModel, requestLogResponsePreview } from "@ccr/core/observability/request-log-model";
 import { isSensitiveRequestLogHeaderName } from "@ccr/core/observability/sensitive-headers";
 import type {
   AgentAnalysisAgentRow,
@@ -235,6 +235,7 @@ type StoredRequestLogEntry = {
   requestBody: RequestLogBody;
   requestHeaders: Record<string, string | string[]>;
   requestId: string;
+  requestPreview: string;
   routeAttemptCount: number;
   routeHopCount: number;
   routeTrace?: RequestRouteTrace;
@@ -243,6 +244,7 @@ type StoredRequestLogEntry = {
   resolvedModel: string;
   responseBody?: RequestLogBody;
   responseModel: string;
+  responsePreview: string;
   responseHeaders: Record<string, string | string[]>;
   statusCode: number;
   totalTokens: number;
@@ -587,6 +589,8 @@ export class RequestLogStore {
       requestLogResponseModel(responseBodyText) ??
       "";
     const callType = requestLogCallType(input.requestBody) ?? "";
+    const requestPreview = requestLogRequestPreview(input.requestBody) ?? "";
+    const responsePreview = requestLogResponsePreview(responseBodyText) ?? "";
     const provider =
       normalizeFilterValue(input.providerName) ??
       readResponseHeader(input.responseHeaders, "x-gateway-target-provider-name") ??
@@ -669,6 +673,8 @@ export class RequestLogStore {
         requested_model,
         resolved_model,
         response_model,
+        request_preview,
+        response_preview,
         route_trace_version,
         route_hop_count,
         route_attempt_count,
@@ -700,7 +706,7 @@ export class RequestLogStore {
         response_body_truncated,
         response_body_ref,
         error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let inserted = false;
@@ -723,6 +729,8 @@ export class RequestLogStore {
         requestedModel,
         resolvedModel,
         responseModel,
+        requestPreview,
+        responsePreview,
         input.routeTrace?.version ?? 0,
         input.routeTrace?.hopCount ?? 0,
         input.routeTrace?.attemptCount ?? 0,
@@ -860,6 +868,9 @@ export class RequestLogStore {
     const responseModelFromTrace = rawInput.responseBodyText === undefined
       ? undefined
       : requestLogResponseModel(rawInput.responseBodyText);
+    const responsePreviewFromTrace = rawInput.responseBodyText === undefined
+      ? undefined
+      : requestLogResponsePreview(rawInput.responseBodyText) ?? "";
     const providerFromTrace = normalizeFilterValue(input.provider);
     const statusCode = rawStatusCode;
     const requestCredentialHeaders = input.requestHeaders ?? {};
@@ -879,6 +890,7 @@ export class RequestLogStore {
     pushValue("model", modelFromTrace);
     pushValue("resolved_model", resolvedModelFromTrace);
     pushValue("response_model", responseModelFromTrace);
+    pushValue("response_preview", responsePreviewFromTrace);
     // The gateway's terminal failure is authoritative, even when it has only
     // an HTTP error status and no error string. A final-attempt raw failure may
     // still refine a gateway success (for example an SSE error inside HTTP 200).
@@ -1057,6 +1069,8 @@ export class RequestLogStore {
             requested_model,
             resolved_model,
             response_model,
+            request_preview,
+            response_preview,
             route_trace_version,
             route_hop_count,
             route_attempt_count,
@@ -1379,6 +1393,8 @@ export class RequestLogStore {
         requested_model TEXT NOT NULL DEFAULT '',
         resolved_model TEXT NOT NULL DEFAULT '',
         response_model TEXT NOT NULL DEFAULT '',
+        request_preview TEXT NOT NULL DEFAULT '',
+        response_preview TEXT NOT NULL DEFAULT '',
         route_trace_version INTEGER NOT NULL DEFAULT 0,
         route_hop_count INTEGER NOT NULL DEFAULT 0,
         route_attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -4248,6 +4264,32 @@ function migrateRequestLogCallTypes(database: SqlDatabase): void {
   })();
 }
 
+function migrateRequestLogPreviews(database: SqlDatabase): void {
+  const rows = queryRows(database, `
+    SELECT
+      rowid AS id,
+      request_body_text,
+      response_body_text
+    FROM request_logs
+  `);
+  if (rows.length === 0) {
+    return;
+  }
+
+  const update = database.prepare(`
+    UPDATE request_logs
+    SET request_preview = ?, response_preview = ?
+    WHERE rowid = ?
+  `);
+  database.transaction(() => {
+    for (const row of rows) {
+      const requestPreview = requestLogRequestPreview(String(row.request_body_text ?? "")) ?? "";
+      const responsePreview = requestLogResponsePreview(String(row.response_body_text ?? "")) ?? "";
+      update.run(requestPreview, responsePreview, normalizeCount(row.id));
+    }
+  })();
+}
+
 function ensureRequestLogSchema(database: SqlDatabase): void {
   const columns = new Set(
     queryRows(database, "PRAGMA table_info(request_logs)")
@@ -4258,6 +4300,7 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
     !columns.has("resolved_model") ||
     !columns.has("response_model");
   const needsCallTypeMigration = !columns.has("call_type");
+  const needsPreviewMigration = !columns.has("request_preview") || !columns.has("response_preview");
   const addColumn = (name: string, definition: string) => {
     if (!columns.has(name)) {
       database.exec(`ALTER TABLE request_logs ADD COLUMN ${name} ${definition}`);
@@ -4283,6 +4326,8 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
   addColumn("requested_model", "TEXT NOT NULL DEFAULT ''");
   addColumn("resolved_model", "TEXT NOT NULL DEFAULT ''");
   addColumn("response_model", "TEXT NOT NULL DEFAULT ''");
+  addColumn("request_preview", "TEXT NOT NULL DEFAULT ''");
+  addColumn("response_preview", "TEXT NOT NULL DEFAULT ''");
   addColumn("route_trace_version", "INTEGER NOT NULL DEFAULT 0");
   addColumn("route_hop_count", "INTEGER NOT NULL DEFAULT 0");
   addColumn("route_attempt_count", "INTEGER NOT NULL DEFAULT 0");
@@ -4326,6 +4371,9 @@ function ensureRequestLogSchema(database: SqlDatabase): void {
   }
   if (needsCallTypeMigration) {
     migrateRequestLogCallTypes(database);
+  }
+  if (needsPreviewMigration) {
+    migrateRequestLogPreviews(database);
   }
 
   ensureRequestLogMigrationSchema(database);
@@ -4892,6 +4940,8 @@ function readRequestLogById(database: SqlDatabase, id: number): StoredRequestLog
         requested_model,
         resolved_model,
         response_model,
+        request_preview,
+        response_preview,
         route_trace_version,
         route_hop_count,
         route_attempt_count,
@@ -4972,6 +5022,7 @@ function toRequestLogEntry(row: Record<string, SqlValue>): StoredRequestLogEntry
     requestBody,
     requestHeaders,
     requestId: String(row.request_id ?? ""),
+    requestPreview: normalizeLabel(String(row.request_preview ?? ""), ""),
     routeAttemptCount: normalizeCount(row.route_attempt_count),
     routeHopCount: normalizeCount(row.route_hop_count),
     routeTraceTruncated: normalizeCount(row.route_trace_truncated) === 1,
@@ -4980,6 +5031,7 @@ function toRequestLogEntry(row: Record<string, SqlValue>): StoredRequestLogEntry
     responseBody,
     responseHeaders,
     responseModel: normalizeLabel(String(row.response_model ?? ""), ""),
+    responsePreview: normalizeLabel(String(row.response_preview ?? ""), ""),
     statusCode: normalizeCount(row.status_code),
     totalTokens: normalizeCount(row.total_tokens),
     url: String(row.url ?? "")

@@ -6,7 +6,7 @@ import {
   ChevronRight, clampNumber, clientInitial, cn, computeTranscriptDiff, Copy, copyTextToClipboard,
   createLogBodyPreviewText, Database, Dialog, DialogBody, DialogContent, DialogHeader, DialogTitle,
   extractRequestSystemPromptText, extractTranscriptMessages, formatBytes, formatCompactNumber, formatDuration,
-  formatLogDateTime, formatLogTokenSummary, formatNetworkRequestRaw, formatNetworkResponseRaw, formatRouteTracePath, formatUsdCost,
+  formatLogDateTime, formatLogDateTimeShort, formatLogTokenSummaryCompact, formatNetworkRequestRaw, formatNetworkResponseRaw, formatRouteTracePath, formatUsdCost,
   FormattedLogBody,
   isJsonContainer, isLargeLogBody, isPlainRecord, jsonChildPath, logRequestModel,
   LogBodyFormatMode, logBodyLargeTextThreshold, logBodyPreviewTextLimit, LogBodyWorkerResponse,
@@ -16,11 +16,10 @@ import {
   ReactNode, ReactPointerEvent, RefreshCw, RequestLogBody, RequestLogBodyChunk, RequestLogEntry, RequestLogListFilter,
   RequestLogPage, requestLogPageSizeOptions, RequestLogStatusFilter, requestLogStatusOptions, Search, Select,
   stripSystemPromptForPreview,
-  transcriptSegmentsForContent, TranscriptMessage, TranscriptSegment,
+  transcriptSegmentsForContent, TranscriptMessage, TranscriptSegment, truncateLogRowPreviewText,
   translateOptions, Trash2, useAppNumberLocale, useAppText, useCallback, useEffect, useMemo, useRef,
   useState
 } from "../shared/index";
-import { TooltipPortal } from "@/components/ui/tooltip";
 type NetworkRequestTab = "body" | "header" | "query" | "raw" | "summary";
 type NetworkResponseTab = "body" | "header" | "raw";
 
@@ -29,7 +28,7 @@ const logJsonContainerPreviewLimit = 80;
 const logJsonAutoExpandTextLimit = 160 * 1024;
 const logBodyAutoLoadJsonBytes = 2 * 1024 * 1024;
 const logBodyWorkerFilterDebounceMs = 180;
-type LogTableColumnId = "time" | "status" | "stream" | "model" | "credential" | "tokens" | "duration";
+type LogTableColumnId = "time" | "status" | "callType" | "requestPreview" | "responsePreview" | "credential" | "tokens" | "duration";
 type LogTableColumn = {
   id: LogTableColumnId;
   minWidth: number;
@@ -41,11 +40,12 @@ type LogTableGridStyle = {
 };
 
 const baseLogTableColumns: LogTableColumn[] = [
-  { id: "time", minWidth: 150 },
+  { id: "time", minWidth: 90 },
   { id: "status", minWidth: 116 },
-  { id: "stream", minWidth: 108 },
-  { id: "model", minWidth: 180 },
-  { id: "tokens", minWidth: 140 },
+  { id: "callType", minWidth: 88 },
+  { id: "requestPreview", minWidth: 190 },
+  { id: "responsePreview", minWidth: 190 },
+  { id: "tokens", minWidth: 110 },
   { id: "duration", minWidth: 92 }
 ];
 const credentialLogTableColumn: LogTableColumn = { id: "credential", minWidth: 128 };
@@ -394,8 +394,8 @@ export function LogsView({
     page.items.some(logHasCredentialInfo);
   const visibleLogColumns = useMemo(() => getLogTableColumns(hasAnyCredentialInfo), [hasAnyCredentialInfo]);
   const logTableGridClass = hasAnyCredentialInfo
-    ? "grid-cols-[minmax(0,0.8fr)_minmax(92px,0.38fr)_minmax(98px,0.4fr)_minmax(0,0.78fr)_minmax(120px,0.42fr)_minmax(0,0.68fr)_82px]"
-    : "grid-cols-[minmax(0,0.8fr)_minmax(92px,0.38fr)_minmax(98px,0.4fr)_minmax(0,0.9fr)_minmax(0,0.74fr)_82px]";
+    ? "grid-cols-[minmax(90px,0.32fr)_minmax(116px,0.3fr)_minmax(88px,0.24fr)_minmax(190px,0.9fr)_minmax(190px,0.9fr)_minmax(128px,0.32fr)_minmax(110px,0.32fr)_92px]"
+    : "grid-cols-[minmax(90px,0.32fr)_minmax(116px,0.3fr)_minmax(88px,0.24fr)_minmax(190px,1fr)_minmax(190px,1fr)_minmax(110px,0.32fr)_92px]";
   const logTableGridStyle = useMemo(
     () => createLogTableGridStyle(visibleLogColumns, logColumnWidths),
     [logColumnWidths, visibleLogColumns]
@@ -786,9 +786,9 @@ function getLogTableColumns(hasCredentialColumn: boolean): LogTableColumn[] {
     return baseLogTableColumns;
   }
   return [
-    ...baseLogTableColumns.slice(0, 4),
+    ...baseLogTableColumns.slice(0, 5),
     credentialLogTableColumn,
-    ...baseLogTableColumns.slice(4)
+    ...baseLogTableColumns.slice(5)
   ];
 }
 
@@ -813,10 +813,12 @@ function logTableColumnLabel(columnId: LogTableColumnId, t: (value: string) => s
       return t("时间");
     case "status":
       return t("状态");
-    case "stream":
-      return t("Stream");
-    case "model":
-      return t("模型");
+    case "callType":
+      return t("Call type");
+    case "requestPreview":
+      return t("Request");
+    case "responsePreview":
+      return t("Response");
     case "credential":
       return t("Credential");
     case "tokens":
@@ -848,7 +850,7 @@ function LogMobileCard({
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
   const createdAt = useMemo(() => formatLogDateTime(item.createdAt), [item.createdAt]);
-  const tokenSummary = useMemo(() => formatLogTokenSummary(item, t, numberLocale), [item, numberLocale, t]);
+  const tokenSummary = useMemo(() => formatLogTokenSummaryCompact(item, t, numberLocale), [item, numberLocale, t]);
 
   return (
     <div className={cn("network-row rounded-md border text-[12px]", expanded && "network-row-selected")}>
@@ -877,6 +879,11 @@ function LogMobileCard({
               {item.retryAttempts.length > 0 ? (
                 <span className="network-service-paused rounded px-1.5 py-0.5 text-[10px] font-bold">
                   R{item.retryAttempts.length}
+                </span>
+              ) : null}
+              {item.callType ? (
+                <span className="network-service-paused rounded px-1.5 py-0.5 text-[10px] font-bold uppercase" title={item.callType}>
+                  {item.callType}
                 </span>
               ) : null}
             </div>
@@ -944,7 +951,8 @@ const LogRow = memo(function LogRow({
   const t = useAppText();
   const numberLocale = useAppNumberLocale();
   const createdAt = useMemo(() => formatLogDateTime(item.createdAt), [item.createdAt]);
-  const tokenSummary = useMemo(() => formatLogTokenSummary(item, t, numberLocale), [item, numberLocale, t]);
+  const createdAtShort = useMemo(() => formatLogDateTimeShort(item.createdAt), [item.createdAt]);
+  const tokenSummary = useMemo(() => formatLogTokenSummaryCompact(item, t, numberLocale), [item, numberLocale, t]);
 
   return (
     <div>
@@ -961,7 +969,7 @@ const LogRow = memo(function LogRow({
         type="button"
       >
         <div className="truncate px-3 font-mono text-[11px]" title={createdAt}>
-          {createdAt}
+          {createdAtShort}
         </div>
         <div className="flex min-w-0 items-center gap-2 px-2">
           <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", expanded && "rotate-180")} />
@@ -976,8 +984,9 @@ const LogRow = memo(function LogRow({
             </span>
           ) : null}
         </div>
-        <LogStreamCell entry={item} />
-        <LogModelRouteCell entry={item} />
+        <LogCallTypeCell entry={item} />
+        <LogRequestPreviewCell entry={item} />
+        <LogResponsePreviewCell entry={item} />
         {hasCredentialInfo ? <LogCredentialCell entry={item} /> : null}
         <div className="network-row-secondary truncate px-2" title={tokenSummary}>{tokenSummary}</div>
         <div className="network-row-secondary truncate px-2">{formatDuration(item.durationMs)}</div>
@@ -1481,89 +1490,40 @@ function LogMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function LogModelRouteCell({ entry }: { entry: RequestLogEntry }) {
-  const requestModel = logRequestModel(entry);
-  const resolvedModel = logResolvedRouteModel(entry);
-  return <LogModelTooltip requestModel={requestModel} resolvedModel={resolvedModel} />;
+function LogCallTypeCell({ entry }: { entry: RequestLogEntry }) {
+  return (
+    <div className="flex min-w-0 items-center px-2">
+      {entry.callType ? (
+        <span
+          className="network-service-paused shrink-0 truncate rounded px-1.5 py-0.5 text-[10px] font-bold uppercase"
+          title={entry.callType}
+        >
+          {entry.callType}
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
-type LogModelTooltipState = {
-  left: number;
-  placement: "above" | "below";
-  top: number;
-  width: number;
-};
-
-function LogModelTooltip({
-  requestModel,
-  resolvedModel
-}: {
-  requestModel: string;
-  resolvedModel: string;
-}) {
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const [tooltip, setTooltip] = useState<LogModelTooltipState>();
-  const value = `${requestModel} -> ${resolvedModel}`;
-
-  useEffect(() => {
-    if (!tooltip) return;
-    const dismiss = () => setTooltip(undefined);
-    window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismiss, true);
-    return () => {
-      window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismiss, true);
-    };
-  }, [tooltip]);
-
-  const showTooltip = () => {
-    const trigger = triggerRef.current;
-    if (!trigger) return;
-
-    const rect = trigger.getBoundingClientRect();
-    const margin = 12;
-    const gap = 6;
-    const availableWidth = Math.max(0, window.innerWidth - margin * 2);
-    const width = Math.min(availableWidth, Math.max(160, Math.min(480, value.length * 7 + 24)));
-    const left = Math.min(
-      Math.max(margin, rect.left + rect.width / 2 - width / 2),
-      Math.max(margin, window.innerWidth - width - margin)
-    );
-    const placement = window.innerHeight - rect.bottom >= 72 || rect.top < 72 ? "below" : "above";
-    setTooltip({
-      left,
-      placement,
-      top: placement === "below" ? rect.bottom + gap : rect.top - gap,
-      width
-    });
-  };
+function LogRequestPreviewCell({ entry }: { entry: RequestLogEntry }) {
+  const t = useAppText();
+  const preview = entry.requestPreview?.trim();
 
   return (
-    <>
-      <div
-        className="flex min-w-0 items-center px-2"
-        onMouseEnter={showTooltip}
-        onMouseLeave={() => setTooltip(undefined)}
-        ref={triggerRef}
-      >
-        <span className="min-w-0 max-w-[45%] truncate">{requestModel}</span>
-        <MoveRight className="mx-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span className="min-w-0 max-w-[45%] truncate">{resolvedModel}</span>
-      </div>
-      {tooltip ? (
-        <TooltipPortal
-          className="break-all px-2.5 py-1.5 font-mono"
-          style={{
-            left: tooltip.left,
-            top: tooltip.top,
-            transform: tooltip.placement === "above" ? "translateY(-100%)" : undefined,
-            width: tooltip.width
-          }}
-        >
-          {value}
-        </TooltipPortal>
-      ) : null}
-    </>
+    <div className="network-row-secondary truncate px-2" title={preview || t("No preview available")}>
+      {preview ? truncateLogRowPreviewText(preview) : "-"}
+    </div>
+  );
+}
+
+function LogResponsePreviewCell({ entry }: { entry: RequestLogEntry }) {
+  const t = useAppText();
+  const preview = entry.responsePreview?.trim();
+
+  return (
+    <div className="network-row-secondary truncate px-2" title={preview || t("No preview available")}>
+      {preview ? truncateLogRowPreviewText(preview) : "-"}
+    </div>
   );
 }
 
@@ -1590,14 +1550,6 @@ function LogStatusDot({ entry }: { entry: RequestLogEntry }) {
   );
 }
 
-function LogStreamCell({ entry }: { entry: RequestLogEntry }) {
-  const t = useAppText();
-  const label = entry.isStream ? t("Streaming") : t("Non-streaming");
-
-  return (
-    <div className="network-row-secondary truncate px-2" title={label}>{label}</div>
-  );
-}
 
 type LogPayloadTab = "transcript" | "body" | "header";
 
