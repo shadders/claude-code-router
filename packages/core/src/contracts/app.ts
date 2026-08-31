@@ -1278,6 +1278,7 @@ export type ObservabilityConfig = {
   agentAnalysis: boolean;
   requestLogBodyCapture?: "all" | "errors" | "none";
   requestLogMaxBodyBytes?: number;
+  requestLogRetentionDays?: number;
   requestLogSuccessSampleRate?: number;
   requestLogs: boolean;
 };

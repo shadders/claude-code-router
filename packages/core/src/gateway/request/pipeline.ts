@@ -295,6 +295,7 @@ export class GatewayRequestPipeline {
           requestHeaders: headers,
           requestId,
           resolvedModel: routedModel,
+          retentionDays: config.observability.requestLogRetentionDays,
           routeTrace: routeTrace?.finish({ captureBodyValues: captureBody }),
           responseBodyText,
           responseBodySizeBytes,

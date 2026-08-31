@@ -121,6 +121,7 @@ export function createDefaultAppConfig(options: DefaultAppConfigOptions = {}): A
       agentAnalysis: false,
       requestLogBodyCapture: "all",
       requestLogMaxBodyBytes: defaultRequestLogBodyBytes,
+      requestLogRetentionDays: 7,
       requestLogSuccessSampleRate: 1,
       requestLogs: false
     },

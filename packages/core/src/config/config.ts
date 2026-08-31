@@ -990,6 +990,9 @@ function parseObservability(value: unknown): Partial<ObservabilityConfig> | unde
   if (typeof value.requestLogMaxBodyBytes === "number" && Number.isFinite(value.requestLogMaxBodyBytes)) {
     observability.requestLogMaxBodyBytes = Math.max(0, Math.min(maxRequestLogBodyBytes, Math.floor(value.requestLogMaxBodyBytes)));
   }
+  if (typeof value.requestLogRetentionDays === "number" && Number.isFinite(value.requestLogRetentionDays)) {
+    observability.requestLogRetentionDays = Math.max(1, Math.min(3650, Math.floor(value.requestLogRetentionDays)));
+  }
   if (typeof value.requestLogSuccessSampleRate === "number" && Number.isFinite(value.requestLogSuccessSampleRate)) {
     observability.requestLogSuccessSampleRate = Math.max(0, Math.min(1, value.requestLogSuccessSampleRate));
   }

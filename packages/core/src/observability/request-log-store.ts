@@ -132,6 +132,7 @@ export type RequestLogRecordInput = {
   requestHeaders: HeaderRecord;
   requestId?: string;
   resolvedModel?: string;
+  retentionDays?: number;
   routeTrace?: RequestRouteTrace;
   responseBodyText?: string;
   responseBodySizeBytes?: number;
@@ -398,6 +399,7 @@ export class RequestLogStore {
   private insertRequestStatement?: BetterSqliteStatement;
   private insertRouteTraceStatement?: BetterSqliteStatement;
   private lastRetentionCleanupDay?: string;
+  private retentionDays = 7;
   private revision = 0;
   private analysisCache?: AgentAnalysisCacheEntry;
 
@@ -550,6 +552,7 @@ export class RequestLogStore {
 
   async record(input: RequestLogRecordInput): Promise<void> {
     const database = await this.getDatabase();
+    this.applyRetentionDays(input.retentionDays);
     this.pruneOldRequestLogs(database);
     const rawRequestHeaders = headersToRecord(input.requestHeaders);
     const rawResponseHeaders = headersToRecord(input.responseHeaders);
@@ -1498,6 +1501,18 @@ export class RequestLogStore {
     return database;
   }
 
+  private applyRetentionDays(days: number | undefined): void {
+    if (typeof days !== "number" || !Number.isFinite(days) || days < 1) {
+      return;
+    }
+    const normalized = Math.floor(days);
+    if (normalized === this.retentionDays) {
+      return;
+    }
+    this.retentionDays = normalized;
+    console.log(`[request-log] Using request log retention window: ${normalized} day(s).`);
+  }
+
   private pruneOldRequestLogs(database: SqlDatabase): void {
     const now = new Date();
     const dayKey = formatLocalDayKey(now);
@@ -1506,7 +1521,7 @@ export class RequestLogStore {
     }
     pruneRawTraceEvents(database, now.getTime());
 
-    const cutoff = floorDay(now).toISOString();
+    const cutoff = new Date(floorDay(now).getTime() - this.retentionDays * 24 * 60 * 60 * 1000).toISOString();
     const staleCount = firstNumber(
       queryRows(
         database,
