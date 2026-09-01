@@ -2735,11 +2735,11 @@ function LogBodyViewer({
 
   return (
     <div className="relative flex min-h-0 flex-1">
-      <div className="absolute right-2 top-2 z-10 flex items-center gap-1">
+      <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1">
         {onFullscreen ? (
           <button
             aria-label={fullscreenLabel ?? t("Open fullscreen JSON viewer")}
-            className="network-control-button flex h-7 w-7 items-center justify-center rounded border outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+            className="network-control-button pointer-events-auto flex h-7 w-7 items-center justify-center rounded border outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
             onClick={onFullscreen}
             title={fullscreenLabel ?? t("Open fullscreen JSON viewer")}
             type="button"
@@ -2750,7 +2750,7 @@ function LogBodyViewer({
         <button
           aria-label={copyLabel}
           className={cn(
-            "network-control-button flex h-7 w-7 items-center justify-center rounded border outline-none focus-visible:ring-2 focus-visible:ring-ring/30",
+            "network-control-button pointer-events-auto flex h-7 w-7 items-center justify-center rounded border outline-none focus-visible:ring-2 focus-visible:ring-ring/30",
             copied && "network-json-copy-success"
           )}
           onClick={() => void copyBody()}
