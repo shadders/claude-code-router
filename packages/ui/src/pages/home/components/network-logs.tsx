@@ -2719,6 +2719,8 @@ function LogBodyViewer({
 }) {
   const t = useAppText();
   const [copied, setCopied] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!copied) {
@@ -2728,14 +2730,37 @@ function LogBodyViewer({
     return () => window.clearTimeout(timer);
   }, [copied]);
 
+  // The overlay is pointer-events-none so wheel scrolling over its empty padding falls through
+  // to the pane content beneath it, but its buttons are individually pointer-events-auto (so
+  // they stay clickable) and aren't themselves scrollable -- a wheel event landing exactly on a
+  // button still needs forwarding to the pane, or it falls through past the pane entirely to the
+  // outer Logs list. React's synthetic wheel listener is passive (can't preventDefault), so this
+  // needs a real DOM listener.
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) {
+      return;
+    }
+    function handleWheel(event: WheelEvent) {
+      const scrollable = containerRef.current?.querySelector<HTMLElement>(".network-code");
+      if (!scrollable) {
+        return;
+      }
+      event.preventDefault();
+      scrollable.scrollTop += event.deltaY;
+    }
+    overlay.addEventListener("wheel", handleWheel, { passive: false });
+    return () => overlay.removeEventListener("wheel", handleWheel);
+  }, []);
+
   async function copyBody() {
     await copyTextToClipboard(copyText);
     setCopied(true);
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1">
-      <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1">
+    <div className="relative flex min-h-0 flex-1" ref={containerRef}>
+      <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-1" ref={overlayRef}>
         {onFullscreen ? (
           <button
             aria-label={fullscreenLabel ?? t("Open fullscreen JSON viewer")}
